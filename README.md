@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # xSpend
 
 Spend tokenized assets through Solana Pay, with a Seeker-native wallet experience.
