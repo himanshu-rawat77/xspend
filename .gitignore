@@ -38,6 +38,9 @@ yarn-error.*
 .env.test.local
 .env.production.local
 
+# devnet mint authority / merchant secrets
+.devnet/
+
 # typescript
 *.tsbuildinfo
 

@@ -1,4 +1,6 @@
-﻿export const formatCurrency = (value: number, decimals: number = 2): string => {
+﻿import { SpendTransaction, TxConfirmationStatus } from '../types';
+
+export const formatCurrency = (value: number, decimals: number = 2): string => {
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
     currency: 'USD',
@@ -22,6 +24,26 @@ export const formatPercent = (value: number): string => {
 export const shortenAddress = (address: string, chars: number = 4): string => {
   if (!address) return '';
   return `${address.slice(0, chars)}...${address.slice(-chars)}`;
+};
+
+export const getTxConfirmationStatus = (tx: SpendTransaction): TxConfirmationStatus => {
+  if (tx.solanaTxSignature?.startsWith('demo_')) return 'confirmed';
+  return tx.confirmationStatus ?? 'confirmed';
+};
+
+export const formatTxNetworkStatus = (tx: SpendTransaction): string => {
+  if (tx.solanaTxSignature?.startsWith('demo_')) return 'Simulated (Demo Mode)';
+  switch (getTxConfirmationStatus(tx)) {
+    case 'submitted':
+    case 'confirming':
+      return 'Submitted — verifying on-chain';
+    case 'failed':
+      return 'Failed on-chain';
+    case 'unknown':
+      return 'Unknown — check explorer';
+    default:
+      return 'Confirmed (Solana)';
+  }
 };
 
 export const generateSolanaSignature = (): string => {

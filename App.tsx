@@ -1,3 +1,4 @@
+import './src/polyfills';
 import React, { useState, useEffect } from 'react';
 import { View, StyleSheet, SafeAreaView, Platform, StatusBar } from 'react-native';
 import { AppModeProvider, useAppMode } from './src/contexts/AppModeContext';
@@ -102,11 +103,13 @@ function App() {
               onOpenBuy={handleBuyStock}
               onOpenRewards={() => setIsRewardsView(true)}
               onNavigateToHistory={() => setActiveTab('history')}
+              onOpenProfile={() => setIsProfileView(true)}
             />
           ) : activeTab === 'markets' ? (
             <MarketsScreen
               onSelectStock={handleSelectStock}
               onOpenSpend={() => setSpendModalVisible(true)}
+              onOpenProfile={() => setIsProfileView(true)}
             />
           ) : activeTab === 'portfolio' ? (
             <PortfolioScreen
@@ -119,6 +122,7 @@ function App() {
             <HistoryScreen
               onSelectTransaction={(tx) => setActiveReceiptTx(tx)}
               onOpenSpend={() => setSpendModalVisible(true)}
+              onOpenProfile={() => setIsProfileView(true)}
             />
           ) : (
             <SettingsScreen />

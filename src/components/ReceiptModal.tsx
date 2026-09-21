@@ -1,9 +1,10 @@
-import React from 'react';
-import { View, Text, StyleSheet, Modal, TouchableOpacity, Share } from 'react-native';
-import { CheckCircle, Zap, ExternalLink, Copy, Check } from 'lucide-react-native';
+import React, { useState } from 'react';
+import { View, Text, StyleSheet, Modal, TouchableOpacity, ActivityIndicator } from 'react-native';
+import { CheckCircle, Zap, ExternalLink, Copy, Check, RotateCcw, Clock, AlertCircle } from 'lucide-react-native';
 import { SpendTransaction } from '../types';
-import { BrandLogo } from './BrandLogo';
-import { formatCurrency, formatNumber, shortenAddress } from '../utils/formatters';
+import { formatCurrency, formatNumber, shortenAddress, formatTxNetworkStatus, getTxConfirmationStatus } from '../utils/formatters';
+import { useStockStore } from '../store/useStockStore';
+import { getConnection, confirmTransaction } from '../services/wallet';
 
 interface ReceiptModalProps {
   visible: boolean;
@@ -16,12 +17,46 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   transaction,
   onClose,
 }) => {
-  const [copied, setCopied] = React.useState(false);
+  const [copied, setCopied] = useState(false);
+  const [isRetrying, setIsRetrying] = useState(false);
+  const storeTx = useStockStore((s) =>
+    transaction ? s.transactions.find((t) => t.id === transaction.id) : undefined
+  );
+  const settleSpend = useStockStore((s) => s.settleSpend);
+  const markSpendStatus = useStockStore((s) => s.markSpendStatus);
+  const syncRealBalances = useStockStore((s) => s.syncRealBalances);
+  const preferredNetwork = useStockStore((s) => s.preferences.preferredNetwork);
 
   if (!transaction) return null;
+  const live = storeTx || transaction;
+  const status = getTxConfirmationStatus(live);
+  const isDemo = live.solanaTxSignature?.startsWith('demo_');
+  const pending = !isDemo && (status === 'submitted' || status === 'confirming');
+  const needsAction = !isDemo && (status === 'failed' || status === 'unknown');
+  const settled = isDemo || status === 'confirmed';
 
-  const isBonus = transaction.rewardType === 'same_brand_bonus';
-  const isPoints = transaction.rewardType === 'protocol_token';
+  const isBonus = live.rewardType === 'same_brand_bonus';
+  const isPoints = live.rewardType === 'protocol_token';
+
+  const handleRetryStatus = async () => {
+    if (!live.solanaTxSignature || isRetrying) return;
+    setIsRetrying(true);
+    markSpendStatus(live.id, 'confirming');
+    try {
+      const cluster = preferredNetwork === 'solana-mainnet' ? 'mainnet-beta' : 'devnet';
+      const result = await confirmTransaction(getConnection(cluster), live.solanaTxSignature, 45000);
+      if (result === 'confirmed') {
+        settleSpend(live.id);
+        syncRealBalances().catch(() => {});
+      } else {
+        markSpendStatus(live.id, result);
+      }
+    } catch {
+      markSpendStatus(live.id, 'unknown');
+    } finally {
+      setIsRetrying(false);
+    }
+  };
 
   const handleCopy = () => {
     setCopied(true);
@@ -32,34 +67,48 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     <Modal visible={visible} animationType="fade" transparent onRequestClose={onClose}>
       <View style={styles.overlay}>
         <View style={styles.card}>
-          {/* Success Icon */}
-          <View style={styles.iconCircle}>
-            <CheckCircle size={44} color="#10B981" strokeWidth={2.4} />
+          {/* Status Icon */}
+          <View style={[styles.iconCircle, needsAction && { backgroundColor: '#FEF2F2' }, pending && { backgroundColor: '#FFFBEB' }]}>
+            {needsAction ? (
+              <AlertCircle size={44} color="#DC2626" strokeWidth={2.4} />
+            ) : pending ? (
+              <Clock size={44} color="#D97706" strokeWidth={2.4} />
+            ) : (
+              <CheckCircle size={44} color="#10B981" strokeWidth={2.4} />
+            )}
           </View>
 
-          <Text style={styles.title}>Payment Successful!</Text>
+          <Text style={styles.title}>
+            {needsAction ? 'Payment needs attention' : pending ? 'Payment submitted' : 'Payment Successful!'}
+          </Text>
           <Text style={styles.subtitle}>
-            Paid to {transaction.merchantName}
+            Paid to {live.merchantName}
           </Text>
 
           {/* Amount Paid */}
           <Text style={styles.amountText}>
-            {formatCurrency(transaction.amountUSD)}
+            {formatCurrency(live.amountUSD)}
           </Text>
 
           {/* Reward Highlight Box */}
-          <View style={[styles.rewardBox, isBonus ? styles.rewardBoxBonus : styles.rewardBoxStandard]}>
+          <View style={[styles.rewardBox, !settled ? styles.rewardBoxPending : isBonus ? styles.rewardBoxBonus : styles.rewardBoxStandard]}>
             <View style={styles.rewardIconBadge}>
-              <Zap size={16} color={isBonus ? '#000000' : '#10B981'} fill={isBonus ? '#000000' : '#10B981'} />
+              <Zap size={16} color={!settled ? '#92400E' : isBonus ? '#000000' : '#10B981'} fill={!settled ? '#92400E' : isBonus ? '#000000' : '#10B981'} />
             </View>
             <View style={{ flex: 1, marginLeft: 10 }}>
-              <Text style={[styles.rewardTitle, isBonus && { color: '#000000' }]}>
-                {isBonus ? '1.5% Same-Brand StockBack Earned!' : isPoints ? '1.0% xToken Points Earned!' : '1.0% StockBack Earned!'}
+              <Text style={[styles.rewardTitle, isBonus && settled && { color: '#000000' }, !settled && { color: '#92400E' }]}>
+                {!settled
+                  ? 'Rewards pending on-chain confirmation'
+                  : isBonus
+                  ? '1.5% Same-Brand StockBack™ Earned! (Sandbox)'
+                  : isPoints
+                  ? '1.0% xToken Points Earned! (Sandbox)'
+                  : '1.0% StockBack™ Earned! (Sandbox Pool)'}
               </Text>
-              <Text style={[styles.rewardDetail, isBonus && { color: '#1F2937' }]}>
+              <Text style={[styles.rewardDetail, isBonus && settled && { color: '#1F2937' }, !settled && { color: '#B45309' }]}>
                 {isPoints
-                  ? `+${Math.round(transaction.rewardAmount)} xToken Points`
-                  : `+${formatNumber(transaction.rewardAmount, 4)} ${transaction.rewardTicker} (+${formatCurrency(transaction.rewardValueUSD)})`}
+                  ? `+${Math.round(live.rewardAmount)} xToken Points`
+                  : `+${formatNumber(live.rewardAmount, 4)} ${live.rewardTicker} (+${formatCurrency(live.rewardValueUSD)})`}
               </Text>
             </View>
           </View>
@@ -69,44 +118,66 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
             <View style={styles.row}>
               <Text style={styles.rowLabel}>Liquidated Stock</Text>
               <Text style={styles.rowVal}>
-                {formatNumber(transaction.stockSoldAmount, 4)} {transaction.stockSoldTicker}
+                {formatNumber(live.stockSoldAmount, 4)} {live.stockSoldTicker}
               </Text>
             </View>
             <View style={styles.row}>
               <Text style={styles.rowLabel}>Settlement Route</Text>
               <Text style={styles.rowValBlue}>
-                {transaction.jupiterRoute.inToken} → USDC
+                {live.jupiterRoute.inToken} → USDC
               </Text>
             </View>
             <View style={styles.row}>
               <Text style={styles.rowLabel}>Solana Signature</Text>
               <TouchableOpacity style={styles.sigRow} onPress={handleCopy}>
                 <Text style={styles.sigText}>
-                  {shortenAddress(transaction.solanaTxSignature, 5)}
+                  {shortenAddress(live.solanaTxSignature, 5)}
                 </Text>
                 {copied ? <Check size={12} color="#10B981" /> : <Copy size={12} color="#6B7280" />}
               </TouchableOpacity>
             </View>
             <View style={styles.row}>
               <Text style={styles.rowLabel}>Network Status</Text>
-              <View style={styles.finalizedBadge}>
-                <Text style={styles.finalizedText}>Finalized (Solana)</Text>
+              <View style={isDemo ? styles.demoBadge : pending ? styles.pendingBadge : needsAction ? styles.failedBadge : styles.finalizedBadge}>
+                <Text style={isDemo ? styles.demoBadgeText : pending ? styles.pendingText : needsAction ? styles.failedText : styles.finalizedText}>
+                  {formatTxNetworkStatus(live)}
+                </Text>
               </View>
             </View>
           </View>
 
+          {needsAction && (
+            <TouchableOpacity style={styles.retryBtn} onPress={handleRetryStatus} disabled={isRetrying} activeOpacity={0.85}>
+              {isRetrying ? (
+                <ActivityIndicator size="small" color="#111827" />
+              ) : (
+                <>
+                  <RotateCcw size={14} color="#111827" style={{ marginRight: 6 }} />
+                  <Text style={styles.retryBtnText}>Retry status check</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          )}
+
           {/* View on Solana Explorer Link */}
-          <TouchableOpacity
-            style={styles.explorerBtn}
-            onPress={() => {
-              const url = `https://solscan.io/tx/${transaction.solanaTxSignature}`;
-              require('react-native').Linking.openURL(url).catch(() => {});
-            }}
-            activeOpacity={0.7}
-          >
-            <ExternalLink size={14} color="#6B7280" style={{ marginRight: 6 }} />
-            <Text style={styles.explorerBtnText}>View on Solscan Explorer</Text>
-          </TouchableOpacity>
+          {!isDemo && (
+            <TouchableOpacity
+              style={styles.explorerBtn}
+              onPress={() => {
+                const isDev = preferredNetwork === 'solana-devnet';
+                const url = isDev
+                  ? `https://solscan.io/tx/${live.solanaTxSignature}?cluster=devnet`
+                  : `https://solscan.io/tx/${live.solanaTxSignature}`;
+                require('react-native').Linking.openURL(url).catch(() => {});
+              }}
+              activeOpacity={0.7}
+            >
+              <ExternalLink size={14} color="#6B7280" style={{ marginRight: 6 }} />
+              <Text style={styles.explorerBtnText}>
+              View on Solscan Explorer {preferredNetwork === 'solana-devnet' ? '(Devnet)' : ''}
+              </Text>
+            </TouchableOpacity>
+          )}
 
           {/* Done Button */}
           <TouchableOpacity style={styles.doneBtn} onPress={onClose} activeOpacity={0.85}>
@@ -257,6 +328,59 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
     color: '#16A34A',
+  },
+  demoBadge: {
+    backgroundColor: '#F3F4F6',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  demoBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#6B7280',
+  },
+  rewardBoxPending: {
+    backgroundColor: '#FFFBEB',
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+  },
+  pendingBadge: {
+    backgroundColor: '#FEF3C7',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  pendingText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#B45309',
+  },
+  failedBadge: {
+    backgroundColor: '#FEE2E2',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  failedText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#B91C1C',
+  },
+  retryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#F3F4F6',
+    borderRadius: 14,
+    paddingVertical: 10,
+    width: '100%',
+    marginBottom: 10,
+  },
+  retryBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#111827',
   },
   explorerBtn: {
     flexDirection: 'row',

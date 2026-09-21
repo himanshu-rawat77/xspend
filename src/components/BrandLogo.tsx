@@ -11,6 +11,20 @@ export const BrandLogo: React.FC<BrandLogoProps> = ({ name, size = 38 }) => {
   const normalized = (name || '').toLowerCase();
 
   switch (normalized) {
+    case 'sol':
+    case 'solana':
+    case 'solx':
+      return (
+        <View style={[styles.container, { width: size, height: size, backgroundColor: '#0B0B14' }]}>
+          <Svg width={size * 0.7} height={size * 0.7} viewBox="0 0 397 311">
+            <Path
+              d="M64.6 237.9c2.4-2.4 5.7-3.8 9.2-3.8h317.4c5.8 0 8.7 7 4.6 11.1l-62.7 62.7c-2.4 2.4-5.7 3.8-9.2 3.8H6.5c-5.8 0-8.7-7-4.6-11.1l62.7-62.7zM64.6 3.8C67 1.4 70.3 0 73.8 0h317.4c5.8 0 8.7 7 4.6 11.1l-62.7 62.7c-2.4 2.4-5.7 3.8-9.2 3.8H6.5C.7 77.6-2.2 70.6 1.9 66.5L64.6 3.8zM332.4 117c-2.4-2.4-5.7-3.8-9.2-3.8H5.8c-5.8 0-8.7 7-4.6 11.1l62.7 62.7c2.4 2.4 5.7 3.8 9.2 3.8h317.4c5.8 0 8.7-7 4.6-11.1L332.4 117z"
+              fill="#14F195"
+            />
+          </Svg>
+        </View>
+      );
+
     case 'msft':
     case 'microsoft':
       return (

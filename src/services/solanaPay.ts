@@ -5,7 +5,7 @@
  * Spec: https://docs.solanapay.com/spec
  */
 
-import { PublicKey } from '@solana/web3.js';
+import { PublicKey, Keypair } from '@solana/web3.js';
 
 const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 
@@ -36,12 +36,12 @@ export function buildSolanaPayUrl(req: SolanaPayRequest): SolanaPayResult {
     recipient,
     amount,
     splToken = USDC_MINT,
-    label = 'StockSpend Payment',
+    label = 'xSpend Payment',
     message,
     memo,
   } = req;
 
-  // Generate a random reference public key if not provided
+  // Generate a random valid reference public key if not provided
   const reference = req.reference ?? generateReferenceKey();
 
   // Validate recipient
@@ -66,16 +66,20 @@ export function buildSolanaPayUrl(req: SolanaPayRequest): SolanaPayResult {
 
 // ─── Reference key generator ──────────────────────────────────────────────────
 /**
- * Generates a random-looking base58 public-key-like string.
- * In a real app, use Keypair.generate().publicKey.toBase58()
+ * Generates a cryptographically valid Ed25519 Solana public key for on-chain indexing.
  */
 export function generateReferenceKey(): string {
-  const chars = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-  let result = '';
-  for (let i = 0; i < 44; i++) {
-    result += chars[Math.floor(Math.random() * chars.length)];
+  try {
+    return Keypair.generate().publicKey.toBase58();
+  } catch {
+    const randomBytes = new Uint8Array(32);
+    if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+      crypto.getRandomValues(randomBytes);
+    } else {
+      for (let i = 0; i < 32; i++) randomBytes[i] = Math.floor(Math.random() * 256);
+    }
+    return new PublicKey(randomBytes).toBase58();
   }
-  return result;
 }
 
 // ─── Payment confirmation polling ─────────────────────────────────────────────
@@ -89,15 +93,26 @@ export async function pollPaymentConfirmation(
   timeoutMs = 60_000,
   intervalMs = 3_000
 ): Promise<string | null> {
+  if (!reference || typeof reference !== 'string' || reference.length < 32 || reference.length > 44) {
+    return null;
+  }
+
+  let refKey: PublicKey;
+  try {
+    refKey = new PublicKey(reference);
+  } catch {
+    console.warn('[solanaPay] Invalid reference public key format:', reference);
+    return null;
+  }
+
   const start = Date.now();
-  const refKey = new PublicKey(reference);
 
   while (Date.now() - start < timeoutMs) {
     try {
       const signatures = await connection.getSignaturesForAddress(refKey, { limit: 1 });
-      if (signatures.length > 0) {
+      if (signatures && signatures.length > 0) {
         const sig = signatures[0];
-        if (!sig.err) {
+        if (sig && !sig.err) {
           return sig.signature;
         }
       }
@@ -134,7 +149,7 @@ export function buildMerchantPayRequest(
     amount: amountUSD,
     splToken: USDC_MINT,
     label: `Pay ${merchantName}`,
-    message: `StockSpend — Pay \$${amountUSD.toFixed(2)} to ${merchantName}`,
+    message: `xSpend — Pay \$${amountUSD.toFixed(2)} to ${merchantName}`,
     memo: orderId ?? `SS-${Date.now()}`,
   });
 }

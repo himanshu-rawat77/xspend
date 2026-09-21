@@ -6,11 +6,56 @@
  * In Live Mode: real API calls + transaction building.
  */
 
-import { Connection, Transaction, VersionedTransaction, PublicKey } from '@solana/web3.js';
+import '../polyfills';
+import { Buffer } from 'buffer';
+import {
+  Connection,
+  Transaction,
+  VersionedTransaction,
+  PublicKey,
+  TransactionInstruction,
+  TransactionMessage,
+  AddressLookupTableAccount,
+} from '@solana/web3.js';
+import {
+  createTransferInstruction,
+  getAssociatedTokenAddress,
+  createAssociatedTokenAccountIdempotentInstruction,
+} from '@solana/spl-token';
 import { fetchWithTimeout } from '../utils/fetchHelper';
 
 const JUPITER_QUOTE_API = 'https://quote-api.jup.ag/v6';
-const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+export const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+
+// ─── Raw Swap Instruction Types ───────────────────────────────────────────────
+export interface JupiterInstructionAccount {
+  pubkey: string;
+  isSigner: boolean;
+  isWritable: boolean;
+}
+
+export interface JupiterRawInstruction {
+  programId: string;
+  accounts: JupiterInstructionAccount[];
+  data: string;
+}
+
+export interface JupiterSwapInstructionsResponse {
+  tokenLedgerInstruction?: JupiterRawInstruction;
+  computeBudgetInstructions: JupiterRawInstruction[];
+  setupInstructions: JupiterRawInstruction[];
+  swapInstruction: JupiterRawInstruction;
+  cleanupInstruction?: JupiterRawInstruction;
+  addressLookupTableAddresses: string[];
+  error?: string;
+}
+
+export interface AtomicSwapAndPayResult {
+  transaction: VersionedTransaction;
+  quote: JupiterQuote;
+  outAmountUsdc: number;
+  priceImpactPct: number;
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 export interface JupiterQuote {
@@ -86,6 +131,8 @@ export function mockJupiterQuote(
 
 // ─── Live Mode ────────────────────────────────────────────────────────────────
 
+export const NATIVE_SOL_MINT = 'So11111111111111111111111111111111111111112';
+
 /**
  * Get a real Jupiter quote for swapping xStock → USDC.
  * @param inputMint  - Source token mint address
@@ -100,7 +147,7 @@ export async function getJupiterQuote(
   const params = new URLSearchParams({
     inputMint,
     outputMint: USDC_MINT,
-    amount: Math.floor(amount).toString(),
+    amount: Math.max(1, Math.floor(amount)).toString(),
     slippageBps: slippageBps.toString(),
     onlyDirectRoutes: 'false',
     asLegacyTransaction: 'false',
@@ -108,13 +155,56 @@ export async function getJupiterQuote(
 
   const response = await fetchWithTimeout(
     `${JUPITER_QUOTE_API}/quote?${params.toString()}`,
-    {},
-    10000
+    {
+      headers: {
+        Accept: 'application/json',
+      },
+    },
+    8000
   );
 
   if (!response.ok) {
     const body = await response.text();
     throw new Error(`Jupiter quote failed (${response.status}): ${body}`);
+  }
+
+  return response.json() as Promise<JupiterQuote>;
+}
+
+/**
+ * Get a real Jupiter quote for BUYING xStock with SOL or USDC.
+ * @param outputMint - Destination xStock token mint address
+ * @param amountUSD  - Purchase amount in USD
+ * @param inputMint  - 'So11111111111111111111111111111111111111112' (SOL) or USDC mint
+ */
+export async function getJupiterBuyQuote(
+  outputMint: string,
+  amountInBaseUnits: number,
+  inputMint: string = USDC_MINT,
+  slippageBps = 50
+): Promise<JupiterQuote> {
+  const params = new URLSearchParams({
+    inputMint,
+    outputMint,
+    amount: Math.max(1, Math.floor(amountInBaseUnits)).toString(),
+    slippageBps: slippageBps.toString(),
+    onlyDirectRoutes: 'false',
+    asLegacyTransaction: 'false',
+  });
+
+  const response = await fetchWithTimeout(
+    `${JUPITER_QUOTE_API}/quote?${params.toString()}`,
+    {
+      headers: {
+        Accept: 'application/json',
+      },
+    },
+    8000
+  );
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Jupiter buy quote failed (${response.status}): ${body}`);
   }
 
   return response.json() as Promise<JupiterQuote>;
@@ -141,10 +231,13 @@ export async function buildSwapTransaction(
     `${JUPITER_QUOTE_API}/swap`,
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
       body: JSON.stringify(body),
     },
-    15000
+    12000
   );
 
   if (!response.ok) {
@@ -180,6 +273,21 @@ export async function prepareSwap(
 }
 
 /**
+ * Prepare BUY swap (USDC/SOL → xStock) via Jupiter.
+ */
+export async function prepareBuySwap(
+  outputMint: string,
+  amountInBaseUnits: number,
+  walletAddress: string,
+  inputMint: string = USDC_MINT,
+  slippageBps = 50
+): Promise<{ quote: JupiterQuote; swapTxBase64: string }> {
+  const quote = await getJupiterBuyQuote(outputMint, amountInBaseUnits, inputMint, slippageBps);
+  const swapTxBase64 = await buildSwapTransaction(quote, walletAddress);
+  return { quote, swapTxBase64 };
+}
+
+/**
  * Submit a signed transaction to the Solana network via Jupiter's endpoint.
  */
 export async function sendSignedTransaction(
@@ -202,3 +310,174 @@ export function uiAmountFromBaseUnits(baseUnits: string, decimals: number): numb
 export function baseUnitsFromUiAmount(uiAmount: number, decimals: number): number {
   return Math.floor(uiAmount * Math.pow(10, decimals));
 }
+
+/**
+ * Helper to deserialize a Jupiter instruction into a web3 TransactionInstruction
+ */
+function deserializeJupiterInstruction(ix: JupiterRawInstruction): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: new PublicKey(ix.programId),
+    keys: ix.accounts.map((a) => ({
+      pubkey: new PublicKey(a.pubkey),
+      isSigner: a.isSigner,
+      isWritable: a.isWritable,
+    })),
+    data: Buffer.from(ix.data, 'base64'),
+  });
+}
+
+/**
+ * Fetch raw swap instructions from Jupiter (instead of prebuilt transaction).
+ */
+export async function getJupiterSwapInstructions(
+  quote: JupiterQuote,
+  userPublicKey: string,
+  priorityFeeLamports: number | 'auto' = 'auto'
+): Promise<JupiterSwapInstructionsResponse> {
+  const body = {
+    quoteResponse: quote,
+    userPublicKey,
+    wrapAndUnwrapSol: true,
+    prioritizationFeeLamports: priorityFeeLamports,
+    dynamicComputeUnitLimit: true,
+  };
+
+  const response = await fetchWithTimeout(
+    `${JUPITER_QUOTE_API}/swap-instructions`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(body),
+    },
+    12000
+  );
+
+  if (!response.ok) {
+    const errBody = await response.text();
+    throw new Error(`Jupiter swap-instructions failed (${response.status}): ${errBody}`);
+  }
+
+  return response.json() as Promise<JupiterSwapInstructionsResponse>;
+}
+
+/**
+ * Builds an Atomic Swap-and-Send VersionedTransaction (v0).
+ * Swaps xStock -> USDC and sends USDC to merchant ATA in one single atomic transaction!
+ */
+export async function buildAtomicSwapAndPayTransaction({
+  connection,
+  userPublicKey,
+  merchantPublicKey,
+  inputMint,
+  outputMint = USDC_MINT,
+  amountInBaseUnits,
+  slippageBps = 50,
+  maxPriceImpactPct = 0.02,
+}: {
+  connection: Connection;
+  userPublicKey: PublicKey;
+  merchantPublicKey: PublicKey;
+  inputMint: string;
+  outputMint?: string;
+  amountInBaseUnits: number;
+  slippageBps?: number;
+  maxPriceImpactPct?: number;
+}): Promise<AtomicSwapAndPayResult> {
+  // 1. Get Jupiter Quote
+  const quote = await getJupiterQuote(inputMint, amountInBaseUnits, slippageBps);
+
+  // 2. Safeguard: Check Price Impact
+  const priceImpact = parseFloat(quote.priceImpactPct ?? '0');
+  if (priceImpact > maxPriceImpactPct) {
+    throw new Error(
+      `Price impact too high: ${(priceImpact * 100).toFixed(2)}% (Max allowed: ${(
+        maxPriceImpactPct * 100
+      ).toFixed(2)}%). Aborting for safety.`
+    );
+  }
+
+  // 3. Fetch Raw Swap Instructions
+  const swapIxData = await getJupiterSwapInstructions(quote, userPublicKey.toBase58());
+  if (swapIxData.error) {
+    throw new Error(`Jupiter swap-instructions error: ${swapIxData.error}`);
+  }
+
+  const {
+    computeBudgetInstructions = [],
+    setupInstructions = [],
+    swapInstruction,
+    cleanupInstruction,
+    addressLookupTableAddresses = [],
+  } = swapIxData;
+
+  // 4. Derive ATAs for User and Merchant
+  const usdcMintPubkey = new PublicKey(outputMint);
+  const userUsdcAta = await getAssociatedTokenAddress(usdcMintPubkey, userPublicKey);
+  const merchantUsdcAta = await getAssociatedTokenAddress(usdcMintPubkey, merchantPublicKey);
+
+  // Create idempotent instruction to ensure merchant USDC ATA exists
+  const ensureMerchantAtaIx = createAssociatedTokenAccountIdempotentInstruction(
+    userPublicKey, // payer
+    merchantUsdcAta,
+    merchantPublicKey,
+    usdcMintPubkey
+  );
+
+  // Transfer swapped USDC from user to merchant ATA
+  const outAmountBigInt = BigInt(quote.outAmount);
+  const transferToMerchantIx = createTransferInstruction(
+    userUsdcAta,
+    merchantUsdcAta,
+    userPublicKey,
+    outAmountBigInt
+  );
+
+  // 5. Assemble all instructions into single atomic array
+  const allInstructions: TransactionInstruction[] = [
+    ...computeBudgetInstructions.map(deserializeJupiterInstruction),
+    ...setupInstructions.map(deserializeJupiterInstruction),
+    deserializeJupiterInstruction(swapInstruction),
+    ...(cleanupInstruction ? [deserializeJupiterInstruction(cleanupInstruction)] : []),
+    ensureMerchantAtaIx,
+    transferToMerchantIx,
+  ];
+
+  // 6. Resolve Address Lookup Tables (ALTs)
+  const lookupTableAccounts: AddressLookupTableAccount[] = [];
+  if (addressLookupTableAddresses && addressLookupTableAddresses.length > 0) {
+    const tablePromises = addressLookupTableAddresses.map(async (addr) => {
+      try {
+        const res = await connection.getAddressLookupTable(new PublicKey(addr));
+        return res.value;
+      } catch (e) {
+        console.warn(`[Jupiter] Failed to fetch lookup table ${addr}:`, e);
+        return null;
+      }
+    });
+    const results = await Promise.all(tablePromises);
+    for (const item of results) {
+      if (item) lookupTableAccounts.push(item);
+    }
+  }
+
+  // 7. Compile v0 Versioned Transaction
+  const { blockhash } = await connection.getLatestBlockhash('confirmed');
+  const messageV0 = new TransactionMessage({
+    payerKey: userPublicKey,
+    recentBlockhash: blockhash,
+    instructions: allInstructions,
+  }).compileToV0Message(lookupTableAccounts);
+
+  const transaction = new VersionedTransaction(messageV0);
+
+  return {
+    transaction,
+    quote,
+    outAmountUsdc: Number(quote.outAmount) / 1e6,
+    priceImpactPct: priceImpact,
+  };
+}
+

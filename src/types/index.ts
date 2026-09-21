@@ -40,6 +40,8 @@ export interface Merchant {
   defaultSpendPresets: number[];
 }
 
+export type TxConfirmationStatus = 'submitted' | 'confirming' | 'confirmed' | 'failed' | 'unknown';
+
 export interface SpendTransaction {
   id: string;
   timestamp: number;
@@ -54,6 +56,8 @@ export interface SpendTransaction {
   rewardAmount: number;
   rewardValueUSD: number;
   solanaTxSignature: string;
+  confirmationStatus?: TxConfirmationStatus;
+  effectsApplied?: boolean;
   jupiterRoute: {
     inToken: string;
     outToken: string;

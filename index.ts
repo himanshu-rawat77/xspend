@@ -1,7 +1,5 @@
-// 1. Mandatory crypto polyfills for Solana Web3.js in React Native
-import 'react-native-get-random-values';
-import { Buffer } from 'buffer';
-global.Buffer = Buffer;
+// 1. Mandatory crypto & buffer polyfills for Solana Web3.js in Hermes
+import './src/polyfills';
 
 import { registerRootComponent } from 'expo';
 import App from './App';

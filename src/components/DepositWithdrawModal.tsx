@@ -1,4 +1,4 @@
-﻿import React, { useState } from 'react';
+import React, { useState } from 'react';
 import { View, Text, StyleSheet, Modal, TouchableOpacity, TextInput } from 'react-native';
 import { X, ArrowDownLeft, ArrowUpRight, Check } from 'lucide-react-native';
 import { useStockStore } from '../store/useStockStore';
@@ -59,7 +59,7 @@ export const DepositWithdrawModal: React.FC<DepositWithdrawModalProps> = ({
 
           <Text style={styles.subtext}>
             {isDeposit
-              ? 'Deposit USDC or SOL into your StockSpend trading account'
+              ? 'Deposit USDC or SOL into your xSpend trading account'
               : `Available balance: ${formatCurrency(totalPortfolioValue)}`}
           </Text>
 

@@ -36,13 +36,13 @@ export const RewardsScreen: React.FC<RewardsScreenProps> = ({
 
           <View style={styles.vaultTag}>
             <Zap size={14} color="#C6FF00" fill="#C6FF00" />
-            <Text style={styles.vaultTagText}>StockBack™ Vault</Text>
+            <Text style={styles.vaultTagText}>StockBack™ (Protocol Demo / Sandbox Pool)</Text>
           </View>
 
           <Text style={styles.vaultAmount}>
             {formatCurrency(accumulatedStockBackUSD)}
           </Text>
-          <Text style={styles.vaultSub}>Total StockBack Earned from Spends</Text>
+          <Text style={styles.vaultSub}>Total StockBack™ (Simulated — Sandbox Pool)</Text>
 
           <View style={styles.divider} />
 

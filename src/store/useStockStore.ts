@@ -1,10 +1,10 @@
 import { create } from 'zustand';
-import { Stock, SpendTransaction, UserPreferences, LiquidationStrategy } from '../types';
+import { Stock, SpendTransaction, UserPreferences, LiquidationStrategy, TxConfirmationStatus } from '../types';
 import { INITIAL_STOCKS } from '../data/mockStocks';
 import { MERCHANTS } from '../data/mockMerchants';
 import { generateSolanaSignature } from '../utils/formatters';
 import { fetchLiveStockPrices, fetchFullPortfolio, XSTOCK_REGISTRY } from '../services/xstocks';
-import { getConnection, fetchSOLBalance } from '../services/wallet';
+import { getConnection, fetchSOLBalance, toValidPublicKey, decodeMWAAddress } from '../services/wallet';
 
 interface StockState {
   // Stocks & Holdings
@@ -32,7 +32,7 @@ interface StockState {
   // Actions
   setSelectedStockId: (id: string) => void;
   refreshLivePrices: () => Promise<void>;
-  syncRealBalances: () => Promise<void>;
+  syncRealBalances: (opts?: { address?: string; cluster?: 'mainnet-beta' | 'devnet' }) => Promise<void>;
   isRefreshingPrices: boolean;
   isSyncingBalances: boolean;
   setWalletAddress: (address: string) => void;
@@ -42,8 +42,15 @@ interface StockState {
     merchantId: string,
     amountUSD: number,
     preferredStockTicker?: string,
-    customMerchantName?: string
+    customMerchantName?: string,
+    opts?: {
+      signature?: string;
+      confirmationStatus?: TxConfirmationStatus;
+      applyEffects?: boolean;
+    }
   ) => SpendTransaction | null;
+  settleSpend: (txId: string) => void;
+  markSpendStatus: (txId: string, status: TxConfirmationStatus) => void;
   buyStock: (stockId: string, amountUSD: number) => boolean;
   sellStock: (stockId: string, shares: number) => boolean;
   depositFunds: (amountUSD: number) => void;
@@ -53,6 +60,7 @@ interface StockState {
   setLiquidationStrategy: (strategy: LiquidationStrategy) => void;
   setNetwork: (network: 'solana-mainnet' | 'solana-devnet') => void;
   updateUserProfile: (profile: Partial<UserPreferences>) => void;
+  creditDevnetTestHoldings: () => void;
   resetToDefaults: () => void;
 }
 
@@ -71,6 +79,8 @@ const INITIAL_TRANSACTIONS: SpendTransaction[] = [
     rewardAmount: 0.0122,
     rewardValueUSD: 2.235,
     solanaTxSignature: '5K3uQ9pX8vLmNwR2yZaB4cDeFgHjK1mN3pQrStUvWxYz7aBcDeFgHjK1mN3pQrStUvWxYz',
+    confirmationStatus: 'confirmed',
+    effectsApplied: true,
     jupiterRoute: {
       inToken: 'AAPLx',
       outToken: 'USDC',
@@ -92,6 +102,8 @@ const INITIAL_TRANSACTIONS: SpendTransaction[] = [
     rewardAmount: 0.00194,
     rewardValueUSD: 0.425,
     solanaTxSignature: '4Z2bT8nK9pLmWvRx3yAaB4cDeFgHjK1mN3pQrStUvWxYz7aBcDeFgHjK1mN3pQrStUvWxYx',
+    confirmationStatus: 'confirmed',
+    effectsApplied: true,
     jupiterRoute: {
       inToken: 'MSFTx',
       outToken: 'USDC',
@@ -113,6 +125,8 @@ const INITIAL_TRANSACTIONS: SpendTransaction[] = [
     rewardAmount: 14.80,
     rewardValueUSD: 0.148,
     solanaTxSignature: '3Y1aR7mJ8oKlVuQw2xZzB4cDeFgHjK1mN3pQrStUvWxYz7aBcDeFgHjK1mN3pQrStUvWxYw',
+    confirmationStatus: 'confirmed',
+    effectsApplied: true,
     jupiterRoute: {
       inToken: 'NVDAx',
       outToken: 'USDC',
@@ -151,7 +165,10 @@ export const useStockStore = create<StockState>((set, get) => ({
   
   setSelectedStockId: (id: string) => set({ selectedStockId: id }),
   
-  setWalletAddress: (address: string) => set({ walletAddress: address, isWalletConnected: true }),
+  setWalletAddress: (address: string) => {
+    const clean = decodeMWAAddress(address) || address.trim();
+    set({ walletAddress: clean, isWalletConnected: true });
+  },
   setSolBalance: (balance: number) => set({ solBalance: balance }),
   setUsdcBalance: (balance: number) => set({ usdcBalance: balance }),
 
@@ -194,50 +211,63 @@ export const useStockStore = create<StockState>((set, get) => ({
 
   isSyncingBalances: false,
 
-  syncRealBalances: async () => {
+  syncRealBalances: async (opts?: { address?: string; cluster?: 'mainnet-beta' | 'devnet' }) => {
     const { walletAddress, preferences } = get();
-    if (!walletAddress) return;
+    const addressToUse = opts?.address || walletAddress;
+    if (!addressToUse) return;
 
     set({ isSyncingBalances: true });
     try {
-      const cluster = preferences.preferredNetwork === 'solana-mainnet' ? 'mainnet-beta' : 'devnet';
+      // Use explicit cluster override if provided (eliminates race condition with setNetwork)
+      const cluster: 'mainnet-beta' | 'devnet' = opts?.cluster
+        ?? (preferences.preferredNetwork === 'solana-mainnet' ? 'mainnet-beta' : 'devnet');
       const connection = getConnection(cluster);
+      const cleanAddress = toValidPublicKey(addressToUse).toBase58();
 
-      // Fetch SOL balance and full xStock portfolio in parallel
-      const [sol, portfolio] = await Promise.all([
-        fetchSOLBalance(connection, walletAddress),
-        fetchFullPortfolio(connection, walletAddress),
+      // Fetch SOL and SPL tokens resiliently and independently
+      const [solResult, portfolioResult] = await Promise.allSettled([
+        fetchSOLBalance(connection, cleanAddress),
+        fetchFullPortfolio(connection, cleanAddress),
       ]);
+
+      const sol = solResult.status === 'fulfilled' ? solResult.value : get().solBalance;
+      const portfolio = portfolioResult.status === 'fulfilled' ? portfolioResult.value : [];
 
       const currentStocks = get().stocks;
       let newTotalPortfolioValue = 0;
 
       const updatedStocks = currentStocks.map((stock) => {
-        const liveHolding = portfolio.find(
-          (p) => p.ticker === stock.tokenTicker || p.ticker === stock.ticker
-        );
-
-        if (liveHolding) {
-          const newHoldings = liveHolding.holdings > 0 ? liveHolding.holdings : stock.holdings;
-          const newPrice = liveHolding.price > 0 ? liveHolding.price : stock.price;
-          const newInvested = newHoldings * newPrice;
+        if (stock.ticker === 'SOL' || stock.id === 'sol') {
+          const newHoldings = sol;
+          const newInvested = newHoldings * stock.price;
           newTotalPortfolioValue += newInvested;
-
           return {
             ...stock,
             holdings: newHoldings,
-            price: newPrice,
-            change24h: liveHolding.change24h || stock.change24h,
             investedValue: newInvested,
           };
         }
 
-        newTotalPortfolioValue += stock.holdings * stock.price;
-        return stock;
+        const liveHolding = portfolio.find(
+          (p) => p.ticker === stock.tokenTicker || p.ticker === stock.ticker
+        );
+
+        const newHoldings = liveHolding ? liveHolding.holdings : stock.holdings;
+        const newPrice = liveHolding && liveHolding.price > 0 ? liveHolding.price : stock.price;
+        const newInvested = newHoldings * newPrice;
+        newTotalPortfolioValue += newInvested;
+
+        return {
+          ...stock,
+          holdings: newHoldings,
+          price: newPrice,
+          change24h: liveHolding?.change24h || stock.change24h,
+          investedValue: newInvested,
+        };
       });
 
       set({
-        solBalance: sol > 0 ? sol : get().solBalance,
+        solBalance: sol,
         stocks: updatedStocks,
         totalPortfolioValue: newTotalPortfolioValue > 0 ? newTotalPortfolioValue : get().totalPortfolioValue,
         isSyncingBalances: false,
@@ -247,14 +277,51 @@ export const useStockStore = create<StockState>((set, get) => ({
       set({ isSyncingBalances: false });
     }
   },
+
+  creditDevnetTestHoldings: () => {
+    const currentStocks = get().stocks;
+    const devnetHoldingsMap: Record<string, number> = {
+      AAPLx: 2.5,
+      TSLAx: 3.0,
+      NVDAx: 5.0,
+      MSFTx: 2.0,
+      AMZNx: 4.0,
+    };
+
+    let newTotal = 0;
+    const updated = currentStocks.map((stock) => {
+      const defaultHolding = devnetHoldingsMap[stock.tokenTicker] || (stock.holdings > 0 ? stock.holdings : 1.0);
+      const invested = defaultHolding * stock.price;
+      newTotal += invested;
+      return {
+        ...stock,
+        holdings: defaultHolding,
+        investedValue: invested,
+      };
+    });
+
+    set({
+      stocks: updated,
+      totalPortfolioValue: newTotal,
+      usdcBalance: 150.0,
+    });
+  },
   
   executeSpend: (
     merchantId: string,
     amountUSD: number,
     preferredStockTicker?: string,
-    customMerchantName?: string
+    customMerchantName?: string,
+    opts?: {
+      signature?: string;
+      confirmationStatus?: TxConfirmationStatus;
+      applyEffects?: boolean;
+    }
   ) => {
     const { stocks, preferences, xTokenPoints, accumulatedStockBackUSD, transactions, totalPortfolioValue } = get();
+    const applyEffects = opts?.applyEffects !== false;
+    const confirmationStatus: TxConfirmationStatus = opts?.confirmationStatus
+      ?? (applyEffects ? 'confirmed' : 'submitted');
     let merchant = MERCHANTS.find((m) => m.id === merchantId);
 
     // Support unlisted / custom merchants
@@ -327,28 +394,7 @@ export const useStockStore = create<StockState>((set, get) => ({
       rewardValueUSD = amountUSD * 0.01;
     }
 
-    // 3. Update stock holdings
-    const updatedStocks = stocks.map((s) => {
-      let currentHoldings = s.holdings;
-      
-      // Deduct sold stock
-      if (s.id === sourceStock!.id) {
-        currentHoldings = Math.max(0, currentHoldings - sharesToSell);
-      }
-      
-      // Add rewarded stock if applicable
-      if (rewardType !== 'protocol_token' && targetStockId === s.ticker) {
-        currentHoldings += rewardAmount;
-      }
-      
-      return {
-        ...s,
-        holdings: currentHoldings,
-        investedValue: currentHoldings * s.price,
-      };
-    });
-
-    // 4. Create transaction receipt
+    // 3. Create transaction receipt (balances apply only after on-chain confirm)
     const tx: SpendTransaction = {
       id: `tx-${Date.now()}`,
       timestamp: Date.now(),
@@ -362,7 +408,9 @@ export const useStockStore = create<StockState>((set, get) => ({
       rewardTicker,
       rewardAmount,
       rewardValueUSD,
-      solanaTxSignature: generateSolanaSignature(),
+      solanaTxSignature: opts?.signature || generateSolanaSignature(),
+      confirmationStatus,
+      effectsApplied: applyEffects,
       jupiterRoute: {
         inToken: sourceStock.tokenTicker,
         outToken: 'USDC',
@@ -371,20 +419,96 @@ export const useStockStore = create<StockState>((set, get) => ({
       },
     };
 
-    // 5. Update state
-    set({
-      stocks: updatedStocks,
-      totalPortfolioValue: totalPortfolioValue - amountUSD + rewardValueUSD,
-      xTokenPoints: rewardType === 'protocol_token' ? xTokenPoints + Math.round(rewardAmount) : xTokenPoints,
-      accumulatedStockBackUSD: accumulatedStockBackUSD + rewardValueUSD,
-      transactions: [tx, ...transactions],
-    });
+    if (applyEffects) {
+      const updatedStocks = stocks.map((s) => {
+        let currentHoldings = s.holdings;
+        if (s.id === sourceStock!.id) {
+          currentHoldings = Math.max(0, currentHoldings - sharesToSell);
+        }
+        if (rewardType !== 'protocol_token' && targetStockId === s.ticker) {
+          currentHoldings += rewardAmount;
+        }
+        return {
+          ...s,
+          holdings: currentHoldings,
+          investedValue: currentHoldings * s.price,
+        };
+      });
+
+      set({
+        stocks: updatedStocks,
+        totalPortfolioValue: totalPortfolioValue - amountUSD + rewardValueUSD,
+        xTokenPoints: rewardType === 'protocol_token' ? xTokenPoints + Math.round(rewardAmount) : xTokenPoints,
+        accumulatedStockBackUSD: accumulatedStockBackUSD + rewardValueUSD,
+        transactions: [tx, ...transactions],
+      });
+    } else {
+      set({ transactions: [tx, ...transactions] });
+    }
 
     return tx;
   },
 
+  settleSpend: (txId: string) => {
+    const { stocks, transactions, xTokenPoints, accumulatedStockBackUSD, totalPortfolioValue } = get();
+    const tx = transactions.find((t) => t.id === txId);
+    if (!tx || tx.effectsApplied) {
+      set({
+        transactions: transactions.map((t) =>
+          t.id === txId ? { ...t, confirmationStatus: 'confirmed' } : t
+        ),
+      });
+      return;
+    }
+
+    const sourceStock = stocks.find(
+      (s) => s.tokenTicker === tx.stockSoldTicker || s.ticker === tx.stockSoldTicker
+    );
+    const rewardStock = stocks.find(
+      (s) => s.tokenTicker === tx.rewardTicker || s.ticker === tx.rewardTicker
+    );
+
+    const updatedStocks = stocks.map((s) => {
+      let currentHoldings = s.holdings;
+      if (sourceStock && s.id === sourceStock.id) {
+        currentHoldings = Math.max(0, currentHoldings - tx.stockSoldAmount);
+      }
+      if (tx.rewardType !== 'protocol_token' && rewardStock && s.id === rewardStock.id) {
+        currentHoldings += tx.rewardAmount;
+      }
+      return {
+        ...s,
+        holdings: currentHoldings,
+        investedValue: currentHoldings * s.price,
+      };
+    });
+
+    set({
+      stocks: updatedStocks,
+      totalPortfolioValue: totalPortfolioValue - tx.amountUSD + tx.rewardValueUSD,
+      xTokenPoints:
+        tx.rewardType === 'protocol_token'
+          ? xTokenPoints + Math.round(tx.rewardAmount)
+          : xTokenPoints,
+      accumulatedStockBackUSD: accumulatedStockBackUSD + tx.rewardValueUSD,
+      transactions: transactions.map((t) =>
+        t.id === txId
+          ? { ...t, confirmationStatus: 'confirmed', effectsApplied: true }
+          : t
+      ),
+    });
+  },
+
+  markSpendStatus: (txId: string, status: TxConfirmationStatus) => {
+    set({
+      transactions: get().transactions.map((t) =>
+        t.id === txId ? { ...t, confirmationStatus: status } : t
+      ),
+    });
+  },
+
   buyStock: (stockId: string, amountUSD: number) => {
-    const { stocks, totalPortfolioValue } = get();
+    const { stocks, totalPortfolioValue, transactions } = get();
     const target = stocks.find((s) => s.id === stockId);
     if (!target || amountUSD <= 0) return false;
 
@@ -401,9 +525,32 @@ export const useStockStore = create<StockState>((set, get) => ({
       return s;
     });
 
+    const buyTx: SpendTransaction = {
+      id: `buy-${Date.now()}`,
+      timestamp: Date.now(),
+      merchantName: `Jupiter Swap (Buy ${target.tokenTicker})`,
+      merchantId: target.logo || 'jupiter',
+      amountUSD,
+      stockSoldTicker: 'USDC',
+      stockSoldAmount: amountUSD,
+      stockSoldPrice: 1.0,
+      rewardType: 'brand_stock',
+      rewardTicker: target.tokenTicker,
+      rewardAmount: addedShares,
+      rewardValueUSD: amountUSD,
+      solanaTxSignature: generateSolanaSignature(),
+      jupiterRoute: {
+        inToken: 'USDC',
+        outToken: target.tokenTicker,
+        slippage: 0.1,
+        priceImpact: 0.01,
+      },
+    };
+
     set({
       stocks: updatedStocks,
       totalPortfolioValue: totalPortfolioValue + amountUSD,
+      transactions: [buyTx, ...transactions],
     });
     return true;
   },

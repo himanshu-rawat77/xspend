@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "stockspend",
+    "name": "xSpend",
     "slug": "stockspend",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -21,6 +21,11 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "7ffa6282-e7c9-4725-a6e2-345cad225d83"
+      }
     }
   }
 }

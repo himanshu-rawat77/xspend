@@ -25,11 +25,13 @@ import {
 import { useStockStore } from '../store/useStockStore';
 import { SpendTransaction } from '../types';
 import { BrandLogo } from '../components/BrandLogo';
-import { formatCurrency, formatNumber, shortenAddress } from '../utils/formatters';
+import { formatCurrency, formatNumber, shortenAddress, formatTxNetworkStatus, getTxConfirmationStatus } from '../utils/formatters';
+import { ProfileAvatarButton } from '../components/ProfileAvatarButton';
 
 interface HistoryScreenProps {
   onSelectTransaction: (tx: SpendTransaction) => void;
   onOpenSpend: () => void;
+  onOpenProfile?: () => void;
 }
 
 type FilterType = 'all' | 'spends' | 'rewards' | 'same_brand';
@@ -37,6 +39,7 @@ type FilterType = 'all' | 'spends' | 'rewards' | 'same_brand';
 export const HistoryScreen: React.FC<HistoryScreenProps> = ({
   onSelectTransaction,
   onOpenSpend,
+  onOpenProfile,
 }) => {
   const { transactions, accumulatedStockBackUSD, xTokenPoints } = useStockStore();
   const [filterType, setFilterType] = useState<FilterType>('all');
@@ -78,8 +81,13 @@ export const HistoryScreen: React.FC<HistoryScreenProps> = ({
       >
         {/* Header */}
         <View style={styles.header}>
-          <Text style={styles.title}>Activity & Spends</Text>
-          <Text style={styles.subtitle}>On-chain Solana liquidations & StockBack ledger</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.title}>Activity & Spends</Text>
+            <Text style={styles.subtitle}>On-chain Solana liquidations & StockBack ledger</Text>
+          </View>
+          {onOpenProfile && (
+            <ProfileAvatarButton onPress={onOpenProfile} size={36} />
+          )}
         </View>
 
         {/* Top Summary Metrics Banner */}
@@ -216,11 +224,29 @@ export const HistoryScreen: React.FC<HistoryScreenProps> = ({
                   </Text>
                 </View>
 
-                {/* Bottom Row: On-Chain Finalized & Solscan Link */}
+                {/* Bottom Row: On-Chain status & Solscan Link */}
                 <View style={styles.txBottomRow}>
                   <View style={styles.finalizedPill}>
-                    <CheckCircle2 size={12} color="#16A34A" style={{ marginRight: 4 }} />
-                    <Text style={styles.finalizedText}>Finalized on Solana</Text>
+                    <CheckCircle2
+                      size={12}
+                      color={
+                        getTxConfirmationStatus(tx) === 'failed' || getTxConfirmationStatus(tx) === 'unknown'
+                          ? '#DC2626'
+                          : getTxConfirmationStatus(tx) === 'submitted' || getTxConfirmationStatus(tx) === 'confirming'
+                          ? '#D97706'
+                          : '#16A34A'
+                      }
+                      style={{ marginRight: 4 }}
+                    />
+                    <Text
+                      style={[
+                        styles.finalizedText,
+                        (getTxConfirmationStatus(tx) === 'submitted' || getTxConfirmationStatus(tx) === 'confirming') && { color: '#B45309' },
+                        (getTxConfirmationStatus(tx) === 'failed' || getTxConfirmationStatus(tx) === 'unknown') && { color: '#B91C1C' },
+                      ]}
+                    >
+                      {formatTxNetworkStatus(tx)}
+                    </Text>
                   </View>
 
                   <TouchableOpacity
@@ -254,7 +280,10 @@ const styles = StyleSheet.create({
     paddingBottom: 110,
   },
   header: {
-    marginBottom: 14,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
   },
   title: {
     fontSize: 22,

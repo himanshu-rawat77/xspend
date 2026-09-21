@@ -34,13 +34,22 @@ import {
   Compass,
   RefreshCw,
   Sliders,
+  Smartphone,
+  Sparkles,
 } from 'lucide-react-native';
 import { useStockStore } from '../store/useStockStore';
 import { LiquidationStrategy } from '../types';
 import { RadarWatermark } from '../components/RadarWatermark';
 import { formatCurrency, shortenAddress } from '../utils/formatters';
 import { useAppMode, AppMode } from '../contexts/AppModeContext';
-import { openPhantomConnect, openSolflareConnect } from '../services/wallet';
+import {
+  openPhantomConnect,
+  openSolflareConnect,
+  mwaAuthorize,
+  decodeMWAAddress,
+  type Cluster,
+} from '../services/wallet';
+import type { Chain } from '@solana-mobile/mobile-wallet-adapter-protocol';
 
 interface ProfileScreenProps {
   onBack: () => void;
@@ -74,7 +83,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
     setWalletAddress,
   } = useStockStore();
 
-  const { appMode, setAppMode } = useAppMode();
+  const { appMode, setAppMode, isLive, isDemo } = useAppMode();
 
   const [copied, setCopied] = useState(false);
   const [biometricsEnabled, setBiometricsEnabled] = useState(true);
@@ -86,10 +95,9 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
   const [editAvatarUrl, setEditAvatarUrl] = useState(preferences.avatarUrl);
 
   // Wallet & Mode State
-  const [showLiveWarning, setShowLiveWarning] = useState(false);
   const [showWalletModal, setShowWalletModal] = useState(false);
+  const [modalNetwork, setModalNetwork] = useState<'solana-devnet' | 'solana-mainnet'>(preferences.preferredNetwork);
   const [inputWalletAddress, setInputWalletAddress] = useState(walletAddress);
-  const [pendingMode, setPendingMode] = useState<AppMode | null>(null);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
   const [resetMessage, setResetMessage] = useState(false);
 
@@ -130,14 +138,90 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
     setTimeout(() => setStatusNotice(null), 2500);
   };
 
+  const isDevnet = preferences.preferredNetwork === 'solana-devnet' && isLive;
+  const isMainnet = preferences.preferredNetwork === 'solana-mainnet' && isLive;
+
+  const handleSelectEnvironment = async (env: 'demo' | 'devnet' | 'mainnet') => {
+    if (env === 'demo') {
+      await setAppMode('demo');
+      resetToDefaults();
+      setStatusNotice('Switched to Demo Sandbox');
+      setTimeout(() => setStatusNotice(null), 2500);
+    } else if (env === 'devnet') {
+      setNetwork('solana-devnet');
+      setModalNetwork('solana-devnet');
+      await setAppMode('live');
+      if (walletAddress) await syncRealBalances({ address: walletAddress, cluster: 'devnet' });
+      setStatusNotice('Switched to Solana Devnet');
+      setTimeout(() => setStatusNotice(null), 2500);
+    } else if (env === 'mainnet') {
+      setNetwork('solana-mainnet');
+      setModalNetwork('solana-mainnet');
+      await setAppMode('live');
+      if (walletAddress) await syncRealBalances({ address: walletAddress, cluster: 'mainnet-beta' });
+      setStatusNotice('Switched to Solana Mainnet');
+      setTimeout(() => setStatusNotice(null), 2500);
+    }
+  };
+
+  const handleConnectSeekerMWA = async () => {
+    setStatusNotice('Opening Solana Mobile Wallet Adapter...');
+    try {
+      const targetCluster: 'mainnet-beta' | 'devnet' = modalNetwork === 'solana-mainnet' ? 'mainnet-beta' : 'devnet';
+      const chain = (targetCluster === 'mainnet-beta' ? 'solana:mainnet' : 'solana:devnet') as Chain;
+      const auth = await mwaAuthorize(chain);
+      if (auth && auth.accounts && auth.accounts.length > 0) {
+        const rawAddr = auth.accounts[0].address;
+        const addr = decodeMWAAddress(rawAddr);
+        if (addr && addr.length >= 32) {
+          setNetwork(modalNetwork);
+          await setAppMode('live');
+          setWalletAddress(addr);
+          setInputWalletAddress(addr);
+          setShowWalletModal(false);
+          setStatusNotice(`Linked: ${shortenAddress(addr, 4)}. Fetching on-chain balances on ${targetCluster}...`);
+          await syncRealBalances({ address: addr, cluster: targetCluster });
+          setStatusNotice(`Linked: ${shortenAddress(addr, 4)} — Balances synced!`);
+          setTimeout(() => setStatusNotice(null), 3500);
+          return;
+        }
+      }
+      setStatusNotice('Wallet authorized, but no address was returned.');
+      setTimeout(() => setStatusNotice(null), 3000);
+    } catch (err: any) {
+      console.warn('[MWA] Connect error:', err);
+      const rawMsg = err?.message || '';
+      const msg = rawMsg && rawMsg !== 'null' ? rawMsg : 'Wallet connection canceled or not supported.';
+      setStatusNotice(msg);
+      setTimeout(() => setStatusNotice(null), 4000);
+    }
+  };
+
+  const handleQuickDevnetWallet = async () => {
+    const devnetAddr = '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosg4B9';
+    setNetwork('solana-devnet');
+    setModalNetwork('solana-devnet');
+    await setAppMode('live');
+    setWalletAddress(devnetAddr);
+    setInputWalletAddress(devnetAddr);
+    setShowWalletModal(false);
+    setStatusNotice('Devnet test wallet linked! Syncing on-chain balances...');
+    await syncRealBalances({ address: devnetAddr, cluster: 'devnet' });
+    setStatusNotice('Devnet balances synced!');
+    setTimeout(() => setStatusNotice(null), 3000);
+  };
+
   const handleSaveCustomWallet = async () => {
-    const clean = inputWalletAddress.trim();
+    const clean = decodeMWAAddress(inputWalletAddress.trim()) || inputWalletAddress.trim();
     if (clean.length >= 32 && clean.length <= 44) {
+      const targetCluster: 'mainnet-beta' | 'devnet' = modalNetwork === 'solana-mainnet' ? 'mainnet-beta' : 'devnet';
+      setNetwork(modalNetwork);
+      await setAppMode('live');
       setWalletAddress(clean);
       setShowWalletModal(false);
-      setStatusNotice('Wallet linked! Syncing balances...');
-      await syncRealBalances();
-      setStatusNotice('Real on-chain balances updated!');
+      setStatusNotice(`Syncing ${targetCluster === 'devnet' ? 'Devnet' : 'Mainnet'} balances for ${shortenAddress(clean, 4)}...`);
+      await syncRealBalances({ address: clean, cluster: targetCluster });
+      setStatusNotice(`Real on-chain balances updated on ${targetCluster === 'devnet' ? 'Devnet' : 'Mainnet'}!`);
       setTimeout(() => setStatusNotice(null), 3000);
     } else {
       setStatusNotice('Please enter a valid Solana public key (32-44 characters).');
@@ -151,27 +235,6 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
     await syncRealBalances();
     setStatusNotice('Oracle prices & balances updated!');
     setTimeout(() => setStatusNotice(null), 2500);
-  };
-
-  const handleModePress = (mode: AppMode) => {
-    if (mode === appMode) return;
-    if (mode === 'live') {
-      setPendingMode('live');
-      setShowLiveWarning(true);
-    } else {
-      setAppMode('demo');
-    }
-  };
-
-  const confirmSwitchToLive = async () => {
-    setShowLiveWarning(false);
-    await setAppMode('live');
-    setPendingMode(null);
-  };
-
-  const cancelSwitch = () => {
-    setShowLiveWarning(false);
-    setPendingMode(null);
   };
 
   const strategies: { key: LiquidationStrategy; label: string; desc: string }[] = [
@@ -192,9 +255,6 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
     },
   ];
 
-  const isDemo = appMode === 'demo';
-  const isLive = appMode === 'live';
-
   const presetAvatars = [
     'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
     'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80',
@@ -204,33 +264,6 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
 
   return (
     <View style={styles.container}>
-      {/* ─── Live Mode Warning Modal ──────────────────────────────── */}
-      <Modal visible={showLiveWarning} transparent animationType="fade">
-        <Pressable style={styles.modalBackdrop} onPress={cancelSwitch}>
-          <View style={styles.warningModal}>
-            <View style={styles.warningIconCircle}>
-              <AlertTriangle size={28} color="#F59E0B" />
-            </View>
-            <Text style={styles.warningTitle}>Switch to Live Mode?</Text>
-            <Text style={styles.warningBody}>
-              Live Mode connects to a real Solana wallet and routes real swaps via Jupiter.{'\n\n'}
-              <Text style={styles.warningBold}>Real funds will be at risk.</Text>
-              {'\n'}Only proceed if you understand the risks.
-            </Text>
-            <TouchableOpacity
-              style={styles.warningConfirmBtn}
-              onPress={confirmSwitchToLive}
-              activeOpacity={0.85}
-            >
-              <Text style={styles.warningConfirmText}>Yes, Switch to Live Mode</Text>
-            </TouchableOpacity>
-            <TouchableOpacity onPress={cancelSwitch} activeOpacity={0.7} style={{ marginTop: 12 }}>
-              <Text style={styles.warningCancelText}>Cancel</Text>
-            </TouchableOpacity>
-          </View>
-        </Pressable>
-      </Modal>
-
       {/* ─── Connect Real Wallet Modal ────────────────────────────── */}
       <Modal visible={showWalletModal} transparent animationType="slide" onRequestClose={() => setShowWalletModal(false)}>
         <View style={styles.modalOverlay}>
@@ -246,32 +279,74 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
               Choose your wallet app or enter your Solana public key to sync real SPL balances.
             </Text>
 
-            {/* Phantom Option */}
-            <TouchableOpacity style={styles.walletOptionBtn} onPress={handleOpenPhantom} activeOpacity={0.85}>
-              <View style={styles.walletOptionIconBox}>
-                <Wallet size={20} color="#AB9FF2" />
+            {/* Solana Mobile / MWA Option (Works with Phantom, Solflare, Seeker) */}
+            <TouchableOpacity style={styles.walletOptionBtn} onPress={handleConnectSeekerMWA} activeOpacity={0.85}>
+              <View style={[styles.walletOptionIconBox, { backgroundColor: '#14F19520' }]}>
+                <Smartphone size={20} color="#14F195" />
               </View>
               <View style={{ flex: 1, marginLeft: 12 }}>
-                <Text style={styles.walletOptionTitle}>Phantom Wallet</Text>
-                <Text style={styles.walletOptionDesc}>Open Phantom mobile app</Text>
+                <Text style={styles.walletOptionTitle}>Connect via Wallet App (MWA)</Text>
+                <Text style={styles.walletOptionDesc}>Auto-detects Phantom, Solflare, or Seeker</Text>
               </View>
-              <ExternalLink size={16} color="#9CA3AF" />
+              <Zap size={16} color="#14F195" />
             </TouchableOpacity>
 
-            {/* Solflare Option */}
-            <TouchableOpacity style={[styles.walletOptionBtn, { marginTop: 8 }]} onPress={handleOpenSolflare} activeOpacity={0.85}>
-              <View style={styles.walletOptionIconBox}>
-                <Wallet size={20} color="#FC814A" />
+            {/* Devnet Seeded Test Wallet Option */}
+            <TouchableOpacity style={[styles.walletOptionBtn, { marginTop: 8 }]} onPress={handleQuickDevnetWallet} activeOpacity={0.85}>
+              <View style={[styles.walletOptionIconBox, { backgroundColor: '#8B5CF620' }]}>
+                <Sparkles size={20} color="#8B5CF6" />
               </View>
               <View style={{ flex: 1, marginLeft: 12 }}>
-                <Text style={styles.walletOptionTitle}>Solflare Wallet</Text>
-                <Text style={styles.walletOptionDesc}>Open Solflare mobile app</Text>
+                <Text style={styles.walletOptionTitle}>Quick Devnet Test Wallet</Text>
+                <Text style={styles.walletOptionDesc}>Instant mock funded address (7xKX...4B9)</Text>
               </View>
-              <ExternalLink size={16} color="#9CA3AF" />
+              <Check size={16} color="#8B5CF6" />
             </TouchableOpacity>
+
+            {/* Network Selector for Direct Linking */}
+            <Text style={[styles.inputLabel, { marginTop: 16 }]}>Target Solana Network</Text>
+            <View style={styles.modalNetworkRow}>
+              <TouchableOpacity
+                style={[
+                  styles.modalNetworkChip,
+                  modalNetwork === 'solana-devnet' && styles.modalNetworkChipActiveDevnet,
+                ]}
+                onPress={() => setModalNetwork('solana-devnet')}
+                activeOpacity={0.8}
+              >
+                <View style={[styles.networkDot, { backgroundColor: '#8B5CF6' }]} />
+                <Text
+                  style={[
+                    styles.modalNetworkChipText,
+                    modalNetwork === 'solana-devnet' && { color: '#6D28D9', fontWeight: '800' },
+                  ]}
+                >
+                  🟣 Devnet
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.modalNetworkChip,
+                  modalNetwork === 'solana-mainnet' && styles.modalNetworkChipActiveMainnet,
+                ]}
+                onPress={() => setModalNetwork('solana-mainnet')}
+                activeOpacity={0.8}
+              >
+                <View style={[styles.networkDot, { backgroundColor: '#10B981' }]} />
+                <Text
+                  style={[
+                    styles.modalNetworkChipText,
+                    modalNetwork === 'solana-mainnet' && { color: '#047857', fontWeight: '800' },
+                  ]}
+                >
+                  🟢 Mainnet Beta
+                </Text>
+              </TouchableOpacity>
+            </View>
 
             {/* Direct Address Input */}
-            <Text style={[styles.inputLabel, { marginTop: 16 }]}>Or Enter Solana Address / Public Key</Text>
+            <Text style={[styles.inputLabel, { marginTop: 14 }]}>Solana Public Key / Address</Text>
             <View style={styles.inputWrapper}>
               <TextInput
                 style={styles.textInput}
@@ -284,7 +359,9 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
             </View>
 
             <TouchableOpacity style={styles.saveWalletBtn} onPress={handleSaveCustomWallet} activeOpacity={0.85}>
-              <Text style={styles.saveWalletBtnText}>Link Address & Sync Balances</Text>
+              <Text style={styles.saveWalletBtnText}>
+                {`Link Address & Sync ${modalNetwork === 'solana-devnet' ? 'Devnet' : 'Mainnet'} Balances`}
+              </Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -412,19 +489,20 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
         </View>
 
         {/* ─── App Mode Switcher (Demo vs Live) ───────────────────── */}
-        <Text style={styles.sectionHeading}>App Mode & Environment</Text>
+        {/* ─── Unified App Environment Selector (Demo / Devnet / Mainnet) ────── */}
+        <Text style={styles.sectionHeading}>App Environment & Network</Text>
         <View style={styles.modeCard}>
-          {/* Demo Mode */}
+          {/* 1. Demo Sandbox */}
           <TouchableOpacity
             style={[styles.modeOption, isDemo && styles.modeOptionActive]}
-            onPress={() => handleModePress('demo')}
+            onPress={() => handleSelectEnvironment('demo')}
             activeOpacity={0.85}
           >
             <View style={[styles.modeIconCircle, isDemo && styles.modeIconCircleActive]}>
               <FlaskConical size={18} color={isDemo ? '#141416' : '#9CA3AF'} />
             </View>
             <View style={{ flex: 1, marginLeft: 12 }}>
-              <Text style={[styles.modeTitle, isDemo && styles.modeTitleActive]}>Demo Mode</Text>
+              <Text style={[styles.modeTitle, isDemo && styles.modeTitleActive]}>Demo Sandbox</Text>
               <Text style={[styles.modeDesc, isDemo && styles.modeDescActive]}>
                 Safe mock simulation — test all features risk-free
               </Text>
@@ -436,32 +514,66 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
 
           <View style={styles.modeDivider} />
 
-          {/* Live Mode */}
+          {/* 2. Solana Devnet */}
           <TouchableOpacity
-            style={[styles.modeOption, isLive && styles.modeOptionActiveLive]}
-            onPress={() => handleModePress('live')}
+            style={[styles.modeOption, isDevnet && styles.modeOptionActiveDevnet]}
+            onPress={() => handleSelectEnvironment('devnet')}
             activeOpacity={0.85}
           >
-            <View style={[styles.modeIconCircle, isLive && styles.modeIconCircleLive]}>
-              <Radio size={18} color={isLive ? '#141416' : '#9CA3AF'} />
+            <View style={[styles.modeIconCircle, isDevnet && styles.modeIconCircleDevnet]}>
+              <Sparkles size={18} color={isDevnet ? '#6D28D9' : '#9CA3AF'} />
             </View>
             <View style={{ flex: 1, marginLeft: 12 }}>
-              <Text style={[styles.modeTitle, isLive && styles.modeTitleActive]}>Live Mode</Text>
-              <Text style={[styles.modeDesc, isLive && styles.modeDescActive]}>
-                Real Solana wallet + Jupiter swaps
+              <Text style={[styles.modeTitle, isDevnet && styles.modeTitleActiveDevnet]}>Solana Devnet</Text>
+              <Text style={[styles.modeDesc, isDevnet && styles.modeDescActive]}>
+                Test real on-chain SPL tokens & SOL with free faucet
               </Text>
             </View>
-            <View style={[styles.modeRadio, isLive && styles.modeRadioActive]}>
-              {isLive && <View style={styles.modeRadioInner} />}
+            <View style={[styles.modeRadio, isDevnet && styles.modeRadioActiveDevnet]}>
+              {isDevnet && <View style={styles.modeRadioInnerDevnet} />}
+            </View>
+          </TouchableOpacity>
+
+          <View style={styles.modeDivider} />
+
+          {/* 3. Solana Mainnet */}
+          <TouchableOpacity
+            style={[styles.modeOption, isMainnet && styles.modeOptionActiveLive]}
+            onPress={() => handleSelectEnvironment('mainnet')}
+            activeOpacity={0.85}
+          >
+            <View style={[styles.modeIconCircle, isMainnet && styles.modeIconCircleLive]}>
+              <Radio size={18} color={isMainnet ? '#141416' : '#9CA3AF'} />
+            </View>
+            <View style={{ flex: 1, marginLeft: 12 }}>
+              <Text style={[styles.modeTitle, isMainnet && styles.modeTitleActive]}>Solana Mainnet</Text>
+              <Text style={[styles.modeDesc, isMainnet && styles.modeDescActive]}>
+                Real Solana wallet + live Jupiter DEX swaps
+              </Text>
+            </View>
+            <View style={[styles.modeRadio, isMainnet && styles.modeRadioActive]}>
+              {isMainnet && <View style={styles.modeRadioInner} />}
             </View>
           </TouchableOpacity>
         </View>
 
         {isLive && (
-          <View style={styles.liveBanner}>
-            <Radio size={12} color="#C6FF00" style={{ marginRight: 6 }} />
-            <Text style={styles.liveBannerText}>
-              Live Mode active — connected to Solana mainnet
+          <View
+            style={[
+              styles.liveBanner,
+              isDevnet && { backgroundColor: '#8B5CF620', borderColor: '#8B5CF640' },
+            ]}
+          >
+            <Radio size={12} color={isDevnet ? '#8B5CF6' : '#C6FF00'} style={{ marginRight: 6 }} />
+            <Text
+              style={[
+                styles.liveBannerText,
+                isDevnet && { color: '#8B5CF6' },
+              ]}
+            >
+              {isDevnet
+                ? 'Devnet Mode active — connected to Solana Devnet'
+                : 'Live Mode active — connected to Solana Mainnet Beta'}
             </Text>
           </View>
         )}
@@ -475,15 +587,29 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
                 <Wallet size={18} color="#C6FF00" />
               </View>
               <View style={{ marginLeft: 10 }}>
-                <Text style={styles.walletTitle}>Phantom / Solana Wallet</Text>
+                <Text style={styles.walletTitle}>Solana Wallet</Text>
                 <TouchableOpacity style={styles.addrRow} onPress={handleCopy} activeOpacity={0.7}>
                   <Text style={styles.addrText}>{shortenAddress(walletAddress, 6)}</Text>
                   {copied ? <Check size={12} color="#C6FF00" /> : <Copy size={12} color="#9CA3AF" />}
                 </TouchableOpacity>
               </View>
             </View>
-            <View style={styles.connectedBadge}>
-              <Text style={styles.connectedBadgeText}>{isDemo ? 'Demo' : 'Live'}</Text>
+            <View
+              style={[
+                styles.connectedBadge,
+                isDevnet && { backgroundColor: '#8B5CF620' },
+                isDemo && { backgroundColor: '#F59E0B20' },
+              ]}
+            >
+              <Text
+                style={[
+                  styles.connectedBadgeText,
+                  isDevnet && { color: '#8B5CF6' },
+                  isDemo && { color: '#F59E0B' },
+                ]}
+              >
+                {isDemo ? 'Demo' : isDevnet ? 'Devnet' : 'Live'}
+              </Text>
             </View>
           </View>
 
@@ -611,46 +737,6 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
           </View>
         </View>
 
-        {/* ─── Solana Cluster / Network ───────────────────────────── */}
-        <Text style={styles.sectionHeading}>Solana Cluster</Text>
-        <View style={styles.card}>
-          <View style={styles.networkRow}>
-            <TouchableOpacity
-              style={[
-                styles.networkBtn,
-                preferences.preferredNetwork === 'solana-mainnet' && styles.networkBtnActive,
-              ]}
-              onPress={() => setNetwork('solana-mainnet')}
-            >
-              <Text
-                style={[
-                  styles.networkBtnText,
-                  preferences.preferredNetwork === 'solana-mainnet' && styles.networkBtnTextActive,
-                ]}
-              >
-                Mainnet Beta
-              </Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[
-                styles.networkBtn,
-                preferences.preferredNetwork === 'solana-devnet' && styles.networkBtnActive,
-              ]}
-              onPress={() => setNetwork('solana-devnet')}
-            >
-              <Text
-                style={[
-                  styles.networkBtnText,
-                  preferences.preferredNetwork === 'solana-devnet' && styles.networkBtnTextActive,
-                ]}
-              >
-                Devnet Mock
-              </Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
         {/* ─── Security & Alerts ──────────────────────────────────── */}
         <Text style={styles.sectionHeading}>Security & Preferences</Text>
         <View style={styles.card}>
@@ -697,7 +783,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
 
         {/* Version Footer */}
         <View style={styles.footer}>
-          <Text style={styles.versionText}>StockSpend v1.0.0 (Solana Mainnet/Devnet)</Text>
+          <Text style={styles.versionText}>xSpend v1.0.0 (Solana Mainnet/Devnet)</Text>
           <Text style={styles.buildText}>Decentralized Spend-from-Stocks Protocol</Text>
         </View>
       </ScrollView>
@@ -867,9 +953,16 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
   },
   modeOptionActive: {
-    backgroundColor: 'rgba(198, 255, 0, 0.08)',
+    backgroundColor: 'rgba(245, 158, 11, 0.08)',
     borderWidth: 2,
-    borderColor: '#C6FF00',
+    borderColor: '#F59E0B',
+    borderRadius: 20,
+    margin: 4,
+  },
+  modeOptionActiveDevnet: {
+    backgroundColor: 'rgba(139, 92, 246, 0.08)',
+    borderWidth: 2,
+    borderColor: '#8B5CF6',
     borderRadius: 20,
     margin: 4,
   },
@@ -889,7 +982,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   modeIconCircleActive: {
-    backgroundColor: '#C6FF00',
+    backgroundColor: '#FEF3C7',
+  },
+  modeIconCircleDevnet: {
+    backgroundColor: '#EDE9FE',
   },
   modeIconCircleLive: {
     backgroundColor: '#C6FF00',
@@ -901,6 +997,9 @@ const styles = StyleSheet.create({
   },
   modeTitleActive: {
     color: '#111827',
+  },
+  modeTitleActiveDevnet: {
+    color: '#6D28D9',
   },
   modeDesc: {
     fontSize: 12,
@@ -920,13 +1019,22 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   modeRadioActive: {
-    borderColor: '#111827',
+    borderColor: '#F59E0B',
+  },
+  modeRadioActiveDevnet: {
+    borderColor: '#8B5CF6',
   },
   modeRadioInner: {
     width: 9,
     height: 9,
     borderRadius: 5,
     backgroundColor: '#111827',
+  },
+  modeRadioInnerDevnet: {
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+    backgroundColor: '#8B5CF6',
   },
   modeDivider: {
     height: 1,
@@ -1338,6 +1446,42 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#111827',
     padding: 0,
+  },
+  modalNetworkRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 6,
+  },
+  modalNetworkChip: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#F3F4F6',
+    borderRadius: 12,
+    paddingVertical: 9,
+    paddingHorizontal: 12,
+    borderWidth: 1.5,
+    borderColor: '#E5E7EB',
+  },
+  modalNetworkChipActiveDevnet: {
+    backgroundColor: '#8B5CF615',
+    borderColor: '#8B5CF6',
+  },
+  modalNetworkChipActiveMainnet: {
+    backgroundColor: '#10B98115',
+    borderColor: '#10B981',
+  },
+  modalNetworkChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#6B7280',
+    marginLeft: 6,
+  },
+  networkDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
   },
   saveWalletBtn: {
     backgroundColor: '#C6FF00',

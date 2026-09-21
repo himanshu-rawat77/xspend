@@ -1,5 +1,5 @@
 {
-  "name": "stockspend",
+  "name": "xspend",
   "version": "1.0.0",
   "main": "index.ts",
   "scripts": {
@@ -8,14 +8,19 @@
     "start:tunnel": "expo start --tunnel -c",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "setup:devnet": "node scripts/setup-devnet-test-usdc.js"
   },
   "dependencies": {
     "@expo/metro-runtime": "~3.2.3",
     "@expo/vector-icons": "^14.0.4",
     "@pythnetwork/hermes-client": "^2.1.0",
     "@react-native-async-storage/async-storage": "^1.24.0",
+    "@solana-mobile/mobile-wallet-adapter-protocol": "^2.3.0",
+    "@solana-mobile/mobile-wallet-adapter-protocol-web3js": "^2.3.0",
+    "@solana/spl-token": "^0.4.15",
     "@solana/web3.js": "^1.95.4",
+    "bs58": "^6.0.0",
     "buffer": "^6.0.3",
     "expo": "~51.0.28",
     "expo-camera": "~15.0.16",

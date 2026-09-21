@@ -17,6 +17,7 @@ import { StockItemCard } from '../components/StockItemCard';
 import { BrandLogo } from '../components/BrandLogo';
 import { formatCurrency } from '../utils/formatters';
 import { fetchLiveMarketNews, LiveNewsItem } from '../services/news';
+import { ProfileAvatarButton } from '../components/ProfileAvatarButton';
 
 interface PortfolioScreenProps {
   onSelectStock: (stock: Stock) => void;
@@ -82,12 +83,7 @@ export const PortfolioScreen: React.FC<PortfolioScreenProps> = ({
             <TouchableOpacity style={styles.iconCircle} activeOpacity={0.7}>
               <Bell size={18} color="#111827" />
             </TouchableOpacity>
-            <TouchableOpacity onPress={onOpenProfile} activeOpacity={0.8}>
-              <Image
-                source={{ uri: preferences.avatarUrl }}
-                style={styles.avatar}
-              />
-            </TouchableOpacity>
+            <ProfileAvatarButton onPress={onOpenProfile} size={36} />
           </View>
         </View>
 

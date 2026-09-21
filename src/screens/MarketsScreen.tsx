@@ -11,15 +11,18 @@ import { Search } from 'lucide-react-native';
 import { useStockStore } from '../store/useStockStore';
 import { Stock } from '../types';
 import { StockItemCard } from '../components/StockItemCard';
+import { ProfileAvatarButton } from '../components/ProfileAvatarButton';
 
 interface MarketsScreenProps {
   onSelectStock: (stock: Stock) => void;
   onOpenSpend: () => void;
+  onOpenProfile?: () => void;
 }
 
 export const MarketsScreen: React.FC<MarketsScreenProps> = ({
   onSelectStock,
   onOpenSpend,
+  onOpenProfile,
 }) => {
   const { stocks } = useStockStore();
   const [query, setQuery] = useState('');
@@ -45,8 +48,13 @@ export const MarketsScreen: React.FC<MarketsScreenProps> = ({
         contentContainerStyle={styles.scrollContent}
       >
         <View style={styles.header}>
-          <Text style={styles.headerTitle}>Solana Stock Markets</Text>
-          <Text style={styles.headerSub}>Tokenized US equities on Solana (xStocks)</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.headerTitle}>Solana Stock Markets</Text>
+            <Text style={styles.headerSub}>Tokenized US equities on Solana (xStocks)</Text>
+          </View>
+          {onOpenProfile && (
+            <ProfileAvatarButton onPress={onOpenProfile} size={36} />
+          )}
         </View>
 
         {/* Search */}
@@ -102,7 +110,10 @@ const styles = StyleSheet.create({
     paddingBottom: 110,
   },
   header: {
-    marginBottom: 14,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
   },
   headerTitle: {
     fontSize: 22,

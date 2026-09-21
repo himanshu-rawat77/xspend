@@ -52,6 +52,24 @@ function generateHistory(basePrice: number): Record<Timeframe, ChartPoint[]> {
 
 export const INITIAL_STOCKS: Stock[] = [
   {
+    id: 'sol',
+    ticker: 'SOL',
+    tokenTicker: 'SOL',
+    name: 'Solana',
+    shortName: 'Solana (Native / Wrapped)',
+    logo: 'solana',
+    logoColor: '#9945FF',
+    price: 152.40,
+    change24h: 5.82,
+    marketCap: '$72.4B',
+    volume24h: '$4.2B',
+    solanaMint: 'So11111111111111111111111111111111111111112',
+    holdings: 5.0,
+    investedValue: 762.00,
+    sparkline: [142, 145, 148, 147, 150, 151, 152.40],
+    historicalData: generateHistory(152.40),
+  },
+  {
     id: 'msft',
     ticker: 'MSFT',
     tokenTicker: 'MSFTx',

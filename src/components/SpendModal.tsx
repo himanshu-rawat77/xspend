@@ -34,16 +34,32 @@ import {
 } from 'lucide-react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import QRCode from 'react-native-qrcode-svg';
+import { PublicKey } from '@solana/web3.js';
 import { useStockStore } from '../store/useStockStore';
 import { useAppMode } from '../contexts/AppModeContext';
 import { MERCHANTS } from '../data/mockMerchants';
 import { Merchant, Stock, SpendTransaction } from '../types';
 import { BrandLogo } from './BrandLogo';
 import { formatCurrency, formatNumber, shortenAddress, generateSolanaSignature } from '../utils/formatters';
-import { getJupiterQuote, mockJupiterQuote, JupiterQuote } from '../services/jupiter';
+import {
+  getJupiterQuote,
+  mockJupiterQuote,
+  JupiterQuote,
+  prepareSwap,
+  buildAtomicSwapAndPayTransaction,
+} from '../services/jupiter';
 import { buildSolanaPayUrl, pollPaymentConfirmation, mockSolanaPayConfirmation } from '../services/solanaPay';
 import { calculateReward } from '../services/rewards';
-import { getConnection } from '../services/wallet';
+import {
+  getConnection,
+  confirmTransaction,
+  signAndSendWithMWA,
+  buildDirectPaymentTransaction,
+  buildDevnetSplPaymentTransaction,
+  toValidPublicKey,
+  fetchTokenUiAmount,
+} from '../services/wallet';
+import { DEVNET_TEST_USDC, isDevnetSplConfigured } from '../config/devnet';
 
 interface SpendModalProps {
   visible: boolean;
@@ -72,7 +88,7 @@ export const SpendModal: React.FC<SpendModalProps> = ({
   initialMerchantId = 'apple',
   initialStockTicker,
 }) => {
-  const { stocks, executeSpend, preferences, walletAddress } = useStockStore();
+  const { stocks, executeSpend, settleSpend, markSpendStatus, preferences, walletAddress, setWalletAddress, syncRealBalances } = useStockStore();
   const { isLive, isDemo } = useAppMode();
 
   // Camera permissions
@@ -288,7 +304,7 @@ export const SpendModal: React.FC<SpendModalProps> = ({
         recipient: walletAddress || '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosg4B9',
         amount: rAmt,
         label: `${preferences.userName}'s Store / Payment`,
-        message: `Payment to ${preferences.userName} via StockSpend`,
+        message: `Payment to ${preferences.userName} via xSpend`,
         memo: `SS-REC-${Date.now().toString().slice(-6)}`,
       });
       setQrUrl(payReq.url);
@@ -296,26 +312,49 @@ export const SpendModal: React.FC<SpendModalProps> = ({
     }
   }, [activeTab, receiveAmountStr, walletAddress]);
 
-  // Confirm Swap & Spend
-  const handleConfirmSpend = async () => {
-    if (!canAfford || isSwapping) return;
+  // Error state for spend flow
+  const [spendError, setSpendError] = useState<string | null>(null);
 
+  // Confirm Swap & Spend
+  // In Demo Mode: simulated delay → executeSpend (optimistic).
+  // In Live Mode: caller must have already signed+confirmed the tx externally;
+  //   this function expects an optional solanaSig parameter to be passed in.
+  const handleConfirmSpend = async (solanaSig?: string) => {
+    if (!canAfford || isSwapping) return;
+    setSpendError(null);
     setIsSwapping(true);
     try {
-      await new Promise((r) => setTimeout(r, 1000));
+      if (isLive && !solanaSig) {
+        // In Live Mode without a real signature, we cannot proceed safely.
+        // The wallet signing flow (MWA or deep-link) must provide the sig.
+        setSpendError('Live Mode: Connect a wallet and sign the transaction to continue.');
+        setIsSwapping(false);
+        return;
+      }
+
+      if (!isLive) {
+        // Demo Mode: simulated 1 second delay
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+
       const tx = executeSpend(
         scannedInvoice ? (scannedInvoice.associatedStockId ? scannedInvoice.associatedStockId.toLowerCase() : 'custom') : isCustom ? 'custom' : selectedMerchant.id,
         amount,
         sourceStock.ticker,
-        scannedInvoice ? scannedInvoice.merchantName : isCustom ? customMerchantName : undefined
+        scannedInvoice ? scannedInvoice.merchantName : isCustom ? customMerchantName : undefined,
+        isLive && solanaSig
+          ? { signature: solanaSig, confirmationStatus: 'submitted', applyEffects: false }
+          : { applyEffects: true, confirmationStatus: 'confirmed' }
       );
       setIsSwapping(false);
       if (tx) {
+        const finalTx = solanaSig ? { ...tx, solanaTxSignature: solanaSig } : tx;
         onClose();
-        onSuccess(tx);
+        onSuccess(finalTx);
       }
-    } catch (e) {
+    } catch (e: any) {
       console.warn('[spend] Error during spend:', e);
+      setSpendError(e?.message || 'Transaction failed. Please try again.');
       setIsSwapping(false);
     }
   };
@@ -325,20 +364,25 @@ export const SpendModal: React.FC<SpendModalProps> = ({
     setIsPollingPayment(true);
     try {
       if (isLive) {
+        // Live Mode: poll for real on-chain payment confirmation
         const cluster = preferences.preferredNetwork === 'solana-mainnet' ? 'mainnet-beta' : 'devnet';
         const conn = getConnection(cluster);
-        const sig = await pollPaymentConfirmation(conn, qrReference, 15000, 2000);
+        const sig = await pollPaymentConfirmation(conn, qrReference, 20000, 2000);
         if (sig) {
           const rAmt = parseFloat(receiveAmountStr) || 25;
           const tx = executeSpend('custom', rAmt, sourceStock.ticker, 'Customer Payment');
           if (tx) {
             onClose();
             onSuccess({ ...tx, solanaTxSignature: sig });
-            return;
           }
+        } else {
+          // No payment detected — do NOT fall back to mock in Live Mode
+          setSpendError('Live Mode: No on-chain payment detected within the timeout. Check your Solana Pay QR code.');
         }
+        return;
       }
 
+      // Demo Mode: simulated mock confirmation
       const sig = await mockSolanaPayConfirmation(1500);
       const rAmt = parseFloat(receiveAmountStr) || 25;
       const tx = executeSpend('custom', rAmt, sourceStock.ticker, 'Customer Payment');
@@ -350,6 +394,152 @@ export const SpendModal: React.FC<SpendModalProps> = ({
       setIsPollingPayment(false);
     }
   };
+
+  // ─── Live Mode: Full on-chain spend flow ──────────────────────────────────
+  // Broadcast → instant Submitted receipt → RPC poll → Confirmed (then balances/rewards)
+  const handleLiveSpend = async () => {
+    if (!canAfford || isSwapping) return;
+    setSpendError(null);
+    setIsSwapping(true);
+    try {
+      const cluster = preferences.preferredNetwork === 'solana-mainnet' ? 'mainnet-beta' : 'devnet';
+      const connection = getConnection(cluster);
+
+      const recipientAddr =
+        (scannedInvoice && scannedInvoice.merchantAddress) ||
+        '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosg4B9';
+      const merchantPkForVerify = (scannedInvoice && scannedInvoice.merchantAddress)
+        || (isCustom && customWalletAddress)
+        || DEVNET_TEST_USDC.merchantWallet
+        || recipientAddr;
+      const merchantTitle = scannedInvoice
+        ? scannedInvoice.merchantName
+        : isCustom
+        ? customMerchantName
+        : selectedMerchant?.name || 'Merchant';
+
+      // Amount in base units (xStocks have 8 decimals)
+      const amountBaseUnits = Math.floor((amount / (sourceStock.price || 150)) * 1e8);
+      const inputMint = sourceStock.solanaMint || '';
+      const merchantBefore = cluster === 'devnet' && DEVNET_TEST_USDC.mint
+        ? await fetchTokenUiAmount(connection, merchantPkForVerify, DEVNET_TEST_USDC.mint)
+        : null;
+
+      // ─── Execute MWA with dynamic transaction builder matching authorized feePayer ──
+      try {
+        const mwaResult = await signAndSendWithMWA(async (authorizedWalletPk) => {
+          const senderAddr = authorizedWalletPk || walletAddress;
+          console.log('[LiveSpend] Building transaction for authorized feePayer:', senderAddr);
+
+          if (cluster === 'mainnet-beta' && inputMint) {
+            // Mainnet: Atomic Swap-and-Pay (Jupiter DEX)
+            try {
+              const atomicRes = await buildAtomicSwapAndPayTransaction({
+                connection,
+                userPublicKey: toValidPublicKey(senderAddr),
+                merchantPublicKey: toValidPublicKey(recipientAddr),
+                inputMint,
+                amountInBaseUnits: amountBaseUnits,
+                slippageBps: 50,
+                maxPriceImpactPct: 0.03,
+              });
+              return atomicRes.transaction.serialize();
+            } catch (atomicErr: any) {
+              console.warn('[LiveSpend] Jupiter route unavailable, using direct payment fallback:', atomicErr);
+              const fallbackTxBase64 = await buildDirectPaymentTransaction(
+                connection,
+                senderAddr,
+                recipientAddr,
+                amount,
+                `xSpend: ${sourceStock.ticker} -> ${merchantTitle}`
+              );
+              return fallbackTxBase64;
+            }
+          } else {
+            if (!isDevnetSplConfigured()) {
+              throw new Error(
+                'Devnet test USDC mint is not configured. Run: npm run setup:devnet -- --wallet <SEEKER_ADDRESS>'
+              );
+            }
+            const merchantPk = (scannedInvoice && scannedInvoice.merchantAddress)
+              || (isCustom && customWalletAddress)
+              || DEVNET_TEST_USDC.merchantWallet;
+            const memo = `xSpend Devnet SPL: ${sourceStock.ticker} ($${amount.toFixed(2)}) -> ${merchantTitle}`;
+            return buildDevnetSplPaymentTransaction(
+              connection,
+              senderAddr,
+              merchantPk,
+              amount,
+              DEVNET_TEST_USDC.mint,
+              DEVNET_TEST_USDC.decimals,
+              memo
+            );
+          }
+        }, cluster);
+
+        // Update stored wallet address if we got a fresh one from MWA authorize
+        if (mwaResult.walletPublicKey && mwaResult.walletPublicKey.length >= 32) {
+          setWalletAddress(mwaResult.walletPublicKey);
+        }
+
+        if (mwaResult.signature) {
+          console.log('[LiveSpend] Broadcast:', mwaResult.signature);
+
+          const tx = executeSpend(
+            scannedInvoice ? (scannedInvoice.associatedStockId ? scannedInvoice.associatedStockId.toLowerCase() : 'custom') : isCustom ? 'custom' : selectedMerchant.id,
+            amount,
+            sourceStock.ticker,
+            scannedInvoice ? scannedInvoice.merchantName : isCustom ? customMerchantName : undefined,
+            {
+              signature: mwaResult.signature,
+              confirmationStatus: 'submitted',
+              applyEffects: false,
+            }
+          );
+          if (tx) {
+            markSpendStatus(tx.id, 'confirming');
+            onClose();
+            onSuccess({ ...tx, confirmationStatus: 'confirming', solanaTxSignature: mwaResult.signature });
+          }
+
+          confirmTransaction(connection, mwaResult.signature, 45000)
+            .then(async (result) => {
+              if (!tx) return;
+              if (result === 'confirmed') {
+                console.log('[LiveSpend] Confirmed on-chain:', mwaResult.signature);
+                settleSpend(tx.id);
+                if (merchantBefore != null && DEVNET_TEST_USDC.mint) {
+                  const merchantAfter = await fetchTokenUiAmount(connection, merchantPkForVerify, DEVNET_TEST_USDC.mint);
+                  console.log('[LiveSpend] Merchant tUSDC', { before: merchantBefore, after: merchantAfter });
+                }
+                syncRealBalances().catch(() => {});
+              } else {
+                console.warn('[LiveSpend] Confirm result:', result, mwaResult.signature);
+                markSpendStatus(tx.id, result);
+              }
+            })
+            .catch((err) => {
+              console.warn('[LiveSpend] Background confirm error:', err);
+              if (tx) markSpendStatus(tx.id, 'unknown');
+            });
+          return;
+        }
+      } catch (mwaErr: any) {
+        console.warn('[LiveSpend] MWA flow error:', mwaErr);
+        const customMsg = mwaErr?.message;
+        setSpendError(
+          customMsg && !customMsg.includes('canceled')
+            ? customMsg
+            : 'Wallet signing was canceled or rejected.'
+        );
+      }
+    } catch (err: any) {
+      setSpendError(err?.message || 'Live Mode transaction failed.');
+    } finally {
+      setIsSwapping(false);
+    }
+  };
+
 
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
@@ -988,31 +1178,64 @@ export const SpendModal: React.FC<SpendModalProps> = ({
           {/* Bottom Action Button for Direct / Scanned Invoice modes */}
           {(activeTab === 'direct' || scannedInvoice) && (
             <View style={styles.footer}>
-              <TouchableOpacity
-                style={[
-                  styles.confirmBtn,
-                  (!canAfford || isSwapping) && styles.confirmBtnDisabled,
-                ]}
-                disabled={!canAfford || isSwapping}
-                onPress={handleConfirmSpend}
-                activeOpacity={0.85}
-              >
-                {isSwapping ? (
-                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                    <RefreshCw size={18} color="#000000" style={{ marginRight: 8 }} />
-                    <Text style={styles.confirmBtnText}>Executing Jupiter DEX Swap...</Text>
-                  </View>
-                ) : (
-                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                    <Text style={styles.confirmBtnText}>
-                      {canAfford
-                        ? `Pay ${formatCurrency(amount)} with ${sourceStock.tokenTicker}`
-                        : 'Insufficient Stock Balance'}
-                    </Text>
-                    {canAfford && <ArrowRight size={18} color="#000000" style={{ marginLeft: 6 }} />}
-                  </View>
-                )}
-              </TouchableOpacity>
+              {/* Error banner */}
+              {spendError && (
+                <View style={styles.errorBanner}>
+                  <ShieldAlert size={14} color="#DC2626" style={{ marginRight: 6 }} />
+                  <Text style={styles.errorBannerText}>{spendError}</Text>
+                </View>
+              )}
+
+              {isLive ? (
+                /* Live Mode: show wallet signing button */
+                <TouchableOpacity
+                  style={[styles.confirmBtn, (!canAfford || isSwapping) && styles.confirmBtnDisabled]}
+                  disabled={!canAfford || isSwapping}
+                  onPress={() => handleLiveSpend()}
+                  activeOpacity={0.85}
+                >
+                  {isSwapping ? (
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <RefreshCw size={18} color="#000000" style={{ marginRight: 8 }} />
+                      <Text style={styles.confirmBtnText}>Signing & Confirming On-Chain...</Text>
+                    </View>
+                  ) : (
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <Smartphone size={18} color="#000000" style={{ marginRight: 8 }} />
+                      <Text style={styles.confirmBtnText}>
+                        {canAfford
+                          ? `Sign with Wallet — Pay ${formatCurrency(amount)}`
+                          : 'Insufficient Stock Balance'}
+                      </Text>
+                      {canAfford && <ArrowRight size={18} color="#000000" style={{ marginLeft: 6 }} />}
+                    </View>
+                  )}
+                </TouchableOpacity>
+              ) : (
+                /* Demo Mode: regular confirm */
+                <TouchableOpacity
+                  style={[styles.confirmBtn, (!canAfford || isSwapping) && styles.confirmBtnDisabled]}
+                  disabled={!canAfford || isSwapping}
+                  onPress={() => handleConfirmSpend()}
+                  activeOpacity={0.85}
+                >
+                  {isSwapping ? (
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <RefreshCw size={18} color="#000000" style={{ marginRight: 8 }} />
+                      <Text style={styles.confirmBtnText}>Executing Jupiter DEX Swap...</Text>
+                    </View>
+                  ) : (
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <Text style={styles.confirmBtnText}>
+                        {canAfford
+                          ? `Pay ${formatCurrency(amount)} with ${sourceStock.tokenTicker}`
+                          : 'Insufficient Stock Balance'}
+                      </Text>
+                      {canAfford && <ArrowRight size={18} color="#000000" style={{ marginLeft: 6 }} />}
+                    </View>
+                  )}
+                </TouchableOpacity>
+              )}
             </View>
           )}
         </View>
@@ -1735,5 +1958,22 @@ const styles = StyleSheet.create({
     fontSize: 14.5,
     fontWeight: '800',
     color: '#141416',
+  },
+  errorBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1,
+    borderColor: '#FECACA',
+    borderRadius: 12,
+    padding: 10,
+    marginBottom: 10,
+  },
+  errorBannerText: {
+    flex: 1,
+    fontSize: 12,
+    color: '#DC2626',
+    fontWeight: '600',
+    lineHeight: 17,
   },
 });
