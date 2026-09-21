@@ -217,4 +217,4 @@ Users can configure how their stock portfolio is liquidated at checkout:
 - **xspend Virtual Debit Card**: NFC / Apple Pay integration via virtual Visa/Mastercard rails.
 - **Automated Dollar-Cost-Averaging (DCA)**: Auto-invest leftover change into index xStocks (SPYx / QQQx).
 - **Merchant SDK**: One-click plugin for Shopify, WooCommerce, and Square POS terminals.
->>>>>>> 8f28bc0c454b643c6585e3b0e55617e6a4f278d3
+
